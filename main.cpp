@@ -2,8 +2,6 @@
 #include <filesystem>
 #include "./src/app/processes/ProcessManagement.hpp"
 #include "./src/app/processes/Task.hpp"
-#include <ctime>
-#include <iomanip>
 
 namespace fs = std::filesystem;
 
@@ -30,17 +28,17 @@ int main(int argc, char* argv[]) {
                     if (f_stream.is_open()) {
                         Action taskAction = (action == "encrypt") ? Action::ENCRYPT : Action::DECRYPT;
                         auto task = std::make_unique<Task>(std::move(f_stream), taskAction, filePath);
-                        
-                            std::time_t t = std::time(nullptr);
-                            std::tm* now = std::localtime(&t);
-                            std::cout << "Starting the encryption/decryption at: " << std::put_time(now, "%Y-%m-%d %H:%M:%S") << std::endl;
-                            processManagement.submitToQueue(std::move(task));
-
+                        processManagement.submitToQueue(std::move(task));
                     } else {
                         std::cout << "Unable to open file: " << filePath << std::endl;
                     }
                 }
             }
+
+            // The executeTasks() call is REMOVED.
+            // The destructor of ~ProcessManagement() will now handle waiting
+            // for all tasks to complete before the program exits.
+
         } else {
             std::cout << "Invalid directory path!" << std::endl;
         }
