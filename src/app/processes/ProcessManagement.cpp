@@ -99,7 +99,25 @@ void ProcessManagement::workerLoop() {
 
         // 6. Do the heavy work OUTSIDE the lock
         if (!taskStr.empty()) {
-            executeCryption(taskStr);
+            
+            // --- START TIMING (ctime) ---
+            clock_t start = clock();
+
+            executeCryption(taskStr); // <-- Run the task
+            
+            // --- END TIMING (ctime) ---
+            clock_t end = clock();
+            
+            // Calculate elapsed time in seconds
+            double elapsed_secs = double(end - start) / CLOCKS_PER_SEC;
+
+            // --- Safely print the result ---
+            {
+                // Use the printLock to prevent jumbled output
+                std::lock_guard<std::mutex> lock(printLock);
+                std::cout << "Task (" << taskStr << ") finished in " 
+                          << elapsed_secs << " seconds" << std::endl;
+            }
         }
     }
 }
