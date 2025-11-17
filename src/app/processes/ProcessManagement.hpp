@@ -9,6 +9,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <ctime> // <-- 1. THIS LINE IS NEW
 
 class ProcessManagement
 {
@@ -33,6 +34,8 @@ private:
     
     // Notifies producer when a slot is free
     std::condition_variable slotsAvailable;
+
+    std::mutex printLock; // <-- 2. THIS LINE IS NEW
 
     std::vector<std::thread> workerThreads; // The thread pool
     
