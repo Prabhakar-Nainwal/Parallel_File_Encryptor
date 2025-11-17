@@ -1,62 +1,105 @@
 #include <iostream>
 #include "ProcessManagement.hpp"
-#include <unistd.h>
-#include <cstring>
-#include <sys/fcntl.h>
-#include <sys/wait.h>
-#include "../encryptDecrypt/Cryption.hpp"
-#include <sys/mman.h>
-#include <atomic>
-#include <semaphore.h>
+#include "../encryptDecrypt/Cryption.hpp" // For executeCryption
 
-ProcessManagement::ProcessManagement() {
-    sem_t* itemsSemaphore = sem_open("/items_semaphore", O_CREAT, 0666, 0);
-    sem_t* emptySlotsSemaphore = sem_open("/empty_slots_semaphore", O_CREAT, 0666, 1000);
-    shmFd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    ftruncate(shmFd, sizeof(SharedMemory));
-    sharedMem = static_cast<SharedMemory *>(mmap(nullptr, sizeof(SharedMemory), PROT_READ | PROT_WRITE, MAP_SHARED, shmFd, 0));
-    sharedMem->front = 0;
-    sharedMem->rear = 0;
-    sharedMem->size.store(0);
+// --- Constructor ---
+// Creates the fixed-size thread pool
+ProcessManagement::ProcessManagement() : stopProcessing(false) {
+    
+    // Use the number of hardware cores
+    unsigned int numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 2; // A sensible default
+
+    std::cout << "Launching " << numThreads << " worker threads..." << std::endl;
+
+    // Create and launch all the worker threads
+    for (unsigned int i = 0; i < numThreads; ++i) {
+        workerThreads.emplace_back(&ProcessManagement::workerLoop, this);
+    }
 }
 
+// --- Destructor ---
+// Gracefully shuts down the thread pool
 ProcessManagement::~ProcessManagement() {
-    munmap(sharedMem, sizeof(SharedMemory));
-    shm_unlink(SHM_NAME);
+    std::cout << "Shutting down threads..." << std::endl;
+
+    // 1. Set the stop flag
+    stopProcessing.store(true);
+
+    // 2. Notify ALL threads to wake up and check the flag
+    itemsAvailable.notify_all();
+    slotsAvailable.notify_all(); 
+
+    // 3. Wait for each thread to finish
+    for (std::thread &worker : workerThreads) {
+        if (worker.joinable()) {
+            worker.join(); // Wait for the thread to exit its loop
+        }
+    }
+    std::cout << "All threads shut down." << std::endl;
 }
 
+// --- Producer (Main Thread) ---
+// Adds a task to the queue and notifies a worker
 bool ProcessManagement::submitToQueue(std::unique_ptr<Task> task) {
-    sem_wait(emptySlotsSemaphore);
+    
+    // 1. Lock the queue
     std::unique_lock<std::mutex> lock(queueLock);
 
-    if (sharedMem->size.load() >= 1000) {
-        return false;
-    }
-    strcpy(sharedMem->tasks[sharedMem->rear], task->toString().c_str());
-    sharedMem->rear = (sharedMem->rear + 1) % 1000;
-    sharedMem->size.fetch_add(1);
-    lock.unlock();
-    sem_post(itemsSemaphore);
+    // 2. Wait until there is a free slot OR it's time to stop
+    slotsAvailable.wait(lock, [this] {
+        return (this->taskQueue.size() < this->maxQueueSize) || this->stopProcessing.load();
+    });
 
-    int pid = fork();
-    if (pid < 0) {
-        return false;
-    } else if (pid == 0) {
-        executeTask();
-        exit(0);
-    }
+    // 3. If we woke up because of a stop signal, don't add the task
+    if (stopProcessing.load()) return false;
+
+    // 4. Add the task to the queue
+    taskQueue.push(task->toString());
+
+    // 5. Unlock the mutex
+    lock.unlock(); 
+
+    // 6. Notify ONE waiting worker thread that a task is ready
+    itemsAvailable.notify_one();
+    
     return true;
 }
 
-void ProcessManagement::executeTask() {
-    sem_wait(itemsSemaphore);
-    std::unique_lock<std::mutex> lock(queueLock);
-    char taskStr[256];
-    strcpy(taskStr, sharedMem->tasks[sharedMem->front]);
-    sharedMem->front = (sharedMem->front + 1) % 1000;
-    sharedMem->size.fetch_sub(1);
-    lock.unlock();
-    sem_post(emptySlotsSemaphore);
+// --- Consumer (Worker Threads) ---
+// This is the function ALL worker threads run, in a loop.
+void ProcessManagement::workerLoop() {
+    
+    while (true) {
+        std::string taskStr;
 
-    executeCryption(taskStr);
+        // --- Start Critical Section (under lock) ---
+        {
+            // 1. Lock the queue
+            std::unique_lock<std::mutex> lock(queueLock);
+
+            // 2. Wait until there is a task OR it's time to stop
+            itemsAvailable.wait(lock, [this] {
+                return !this->taskQueue.empty() || this->stopProcessing.load();
+            });
+
+            // 3. Check if we should stop
+            if (stopProcessing.load() && taskQueue.empty()) {
+                return; // Exit the loop, which ends the thread
+            }
+
+            // 4. Get the task from the queue
+            taskStr = taskQueue.front();
+            taskQueue.pop();
+        
+        } // --- End Critical Section (Lock is released here) ---
+
+        // 5. Notify the producer that a slot is now free
+        slotsAvailable.notify_one();
+
+        // 6. Do the heavy work OUTSIDE the lock
+        if (!taskStr.empty()) {
+            executeCryption(taskStr);
+        }
+    }
 }
