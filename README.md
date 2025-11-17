@@ -1,7 +1,8 @@
-
 # C++ File Encryptor/Decryptor
 
-This project is a C++ application that encrypts or decrypts all files within a specified directory. It uses a simple Caesar cipher and leverages multi-processing with shared memory and semaphores to process files concurrently.
+This project is a C++ application that encrypts or decrypts all files within a specified directory. It uses a simple Caesar cipher and leverages **multithreading** with a **thread pool** to process files concurrently.
+
+The application implements a **Producer-Consumer** pattern, where the main thread "produces" file-processing tasks and a pool of worker threads "consumes" them.
 
 ## Features
 
@@ -9,18 +10,17 @@ This project is a C++ application that encrypts or decrypts all files within a s
   * Performs both encryption and decryption.
   * Uses a simple character-based Caesar cipher.
   * Encryption key is loaded from a `.env` file.
-  * Uses multi-processing (`fork`) to handle multiple files concurrently.
-  * Manages tasks between processes using a shared memory queue (`mmap`, `shm_open`) and semaphores.
+  * Uses a **thread pool** (`std::thread`) to handle multiple files concurrently.
+  * Implements a **Producer-Consumer** pattern using `std::mutex` and `std::condition_variable` for efficient, thread-safe task queuing.
 
 ## Project Structure
 
-  * `main.cpp`: The main entry point. Prompts the user for a directory and action, then submits tasks.
+  * `main.cpp`: The main entry point. Prompts the user for a directory and action, then submits tasks to the thread pool.
   * `src/app/processes/`:
-      * `ProcessManagement.hpp/.cpp`: Manages the shared memory task queue and process forking.
+      * `ProcessManagement.hpp/.cpp`: Manages the **thread pool** and the thread-safe task queue.
       * `Task.hpp`: Defines the `Task` struct, which represents a file operation (encrypt/decrypt).
   * `src/app/encryptDecrypt/`:
       * `Cryption.hpp/.cpp`: Contains the core encryption/decryption logic (`executeCryption`).
-      * `CryptionMain.cpp`: A separate executable for testing the cryption logic directly (not used by the main program).
   * `src/app/fileHandling/`:
       * `IO.hpp/.cpp`: A utility class for opening and managing file streams.
       * `ReadEnv.cpp`: A utility class to read the encryption key from the `.env` file.
@@ -31,17 +31,17 @@ This project is a C++ application that encrypts or decrypts all files within a s
 ## How It Works
 
 1.  The main program (`./encrypt_decrypt`) starts and asks the user for a directory path and an action (encrypt/decrypt).
-2.  It initializes shared memory and semaphores for a task queue.
-3.  It iterates through the specified directory. For each file, it creates a `Task`.
-4.  Each `Task` is serialized into a string (e.g., "path/to/file.txt,ENCRYPT") and submitted to the shared memory queue via `ProcessManagement::submitToQueue`.
-5.  For every submitted task, `submitToQueue` `fork()`s a new child process.
-6.  The child process immediately calls `executeTask`.
-7.  `executeTask` waits for a task to be available in the shared memory queue (using semaphores), dequeues it, and passes the task string to `executeCryption`.
-8.  `executeCryption` deserializes the task string, reads the encryption key from the `.env` file, and performs an in-place Caesar cipher (add/subtract key) on the file's content.
+2.  It initializes the `ProcessManagement` class, which creates and launches a **fixed-size thread pool** (typically one worker thread per hardware core). These threads immediately go to sleep, waiting for tasks.
+3.  The main thread (the **Producer**) recursively scans the specified directory. For each file, it creates a `Task`.
+4.  Each `Task` is serialized into a string (e.g., "path/to/file.txt,ENCRYPT") and submitted to the thread-safe queue via `ProcessManagement::submitToQueue`.
+5.  `submitToQueue` notifies *one* of the sleeping worker threads that a task is available.
+6.  A worker thread (a **Consumer**) wakes up, locks the queue, pulls one task, and then unlocks the queue.
+7.  The worker thread executes the task by calling `executeCryption`, which reads the key from `.env` and performs the in-place Caesar cipher on the file.
+8.  After finishing its task, the worker thread loops back to wait for another task. This continues until the main thread has added all files and the program exits.
 
 ## Prerequisites
 
-  * A C++17 compliant compiler (e.g., `g++`)
+  * A C++17 compliant compiler (e.g., `g++`) that supports the `-pthread` flag.
   * `make`
   * `python3` (to use the test file generation script)
 
@@ -61,10 +61,9 @@ This project is a C++ application that encrypts or decrypts all files within a s
 
 ## Build
 
-To build the application, run `make` from the project's root directory. This will create two executables:
+To build the application, run `make` from the project's root directory. This will create a single executable:
 
   * `encrypt_decrypt`: The main application.
-  * `cryption`: A standalone utility for testing the cryption function.
 
 <!-- end list -->
 
@@ -87,7 +86,7 @@ make
     Enter the action (encrypt/decrypt): encrypt
     ```
 
-The application will then fork processes to handle the files in that directory.
+The application will then use its thread pool to process all files. The program will automatically wait for all tasks to be completed before it exits.
 
 ### Generating Test Files (Optional)
 
@@ -101,7 +100,7 @@ A Python script is included to generate a directory named `test` containing 1000
 
 ## Cleanup
 
-To remove all compiled object files and executables, run:
+To remove all compiled object files and the executable, run:
 
 ```bash
 make clean
